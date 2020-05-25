@@ -1,1 +1,4 @@
-thingsboard/
+thingsboard/widgets/downlink/widgetDownlink.js
+thingsboard/widgets/latestDownlinks/widgetLatestDownlinks.js
+real.credentials_lora1.cpp
+credentials.h
