@@ -1,0 +1,13 @@
+{
+      "name": "loramock_request_proxy",
+      "description": "proxy to circumvent Access-Control-Allow-Origin",
+      "version": "0.0.1",
+      "private": true,
+      "scripts": {
+            "start": "node app.js"
+      },
+      "dependencies": {
+            "needle": "2.x.x",
+            "restify": "8.x.x"
+      }
+}
