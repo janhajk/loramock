@@ -39,6 +39,25 @@
 SSD1306 display (OLED_I2C_ADDR, OLED_SDA, OLED_SCL);
 
 
+// DHT22 Sensor
+#include <DHT.h>
+#include <DHT_U.h>
+#define DHTPIN 15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+static int humidity;
+static int temperature;
+
+
+// External Button
+#include <OneButton.h>  //from https://github.com/mathertel/OneButton
+#define BUTTON_PIN 13
+OneButton btn = OneButton(
+  BUTTON_PIN,  // Input pin for the button
+  true,        // Button is active LOW
+  true         // Enable internal pull-up resistor
+);
+
 // NTP Zeit
 #include "time.h"
 const char* ntpServer = "pool.ntp.org";
@@ -49,7 +68,7 @@ const int   daylightOffset_sec = 0; // Soomer/Winterzeit
 #define VERSION "1.0"
 
 
-// OTA  
+// OTA
 #include "OTA.h"
 unsigned long entry;
 
@@ -88,27 +107,25 @@ std::map<size_t, std::map<char*, String>> downloadlinkMsg;
 size_t nextId = 1;
 
 
+// LORA Einstellungen
+// LORA Credentials von externem File laden
 #include "credentials_lora1.h"
-
 void os_getDevEui (u1_t* buf) {
   memcpy_P(buf, DEVEUI, 8);
 }
-
 void os_getArtEui (u1_t* buf) {
   memcpy_P(buf, APPEUI, 8);
 }
-
 void os_getDevKey (u1_t* buf) {
   memcpy_P(buf, APPKEY, 16);
 }
-
-
+// default Port
 static uint8_t LORAWAN_PORT = 1;
 
 static osjob_t sendjob;
 
 // Zwischenspeicher für uplink payload/message
-static uint8_t message[52] = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // 51 bytes; letztes ist "\0"
+static uint8_t message[52] = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // 51 bytes maximale Länge Lora Payload; letztes ist "\0"
 static int mLength = 51;
 
 
@@ -134,18 +151,26 @@ inline bool isInteger(const String & s) {
 // Sendet ein Uplink
 // Kopiert die Message in den Payload
 void do_send(osjob_t* j) {
+
   Serial.println("Sending Message...");
   uint8_t messagePayload[mLength + 1];
   memcpy(messagePayload, message, mLength);
 
+  Serial.print(F("Humidity: "));
+  Serial.print(humidity);
+  Serial.print(F("%  Temperature: "));
+  Serial.println(temperature);
+
+
   // Sendet nicht, wenn schon eine Transaktion läuft
   if (LMIC.opmode & OP_TXRXPEND) {
-    Serial.println(F("OP_TXRXPEND, not sending"));
+    Serial.println(F("OP_TXRXPEND, pending transmission. Resetting..."));
+    digitalWrite(LEDPIN, LOW);
+    LMIC_clrTxData();
+    os_setTimedCallback(&sendjob, os_getTime(), do_send);
   }
   else {
-    // Data Format ist: uint8_t[]
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    //
+    // Data Format von Payload ist: uint8_t[]
     LMIC_setTxData2(LORAWAN_PORT, messagePayload, sizeof(messagePayload) - 1, 0);
     Serial.println(F("Sending uplink packet..."));
     digitalWrite(LEDPIN, HIGH);
@@ -376,7 +401,7 @@ void handleDownlink(RequestContext& request) {
 
 static void initfunc (osjob_t* j) {
   LMIC_reset();
-  LMIC_setClockError(5 * MAX_CLOCK_ERROR / 1000);
+  LMIC_setClockError(10 * MAX_CLOCK_ERROR / 100);
   LMIC_setupChannel(0, 868100000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
   LMIC_setupChannel(1, 868300000, DR_RANGE_MAP(DR_SF12, DR_SF7B), BAND_CENTI);      // g-band
   LMIC_setupChannel(2, 868500000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
@@ -387,6 +412,7 @@ static void initfunc (osjob_t* j) {
   LMIC_setupChannel(7, 867900000, DR_RANGE_MAP(DR_SF12, DR_SF7),  BAND_CENTI);      // g-band
   LMIC_setupChannel(8, 868800000, DR_RANGE_MAP(DR_FSK,  DR_FSK),  BAND_MILLI);      // g2-band
   LMIC.dn2Dr = DR_SF12;
+  LMIC_setDrTxpow(DR_SF12, 17);
   LMIC_startJoining();
 }
 
@@ -399,10 +425,15 @@ void setup() {
   Serial.println(F("Starting..."));
 
 
+  // DHT Sensor
+  pinMode(DHTPIN, INPUT);
+  dht.begin();
+
+  // OTA
   ArduinoOTA.setHostname("LoraMock");
   setupOTA();
 
-
+  // WIFI
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
     delay(250);
@@ -413,6 +444,7 @@ void setup() {
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
 
+  // Webserver
   server
   .buildHandler("/uplink")
   .setDisableAuthOverride()
@@ -436,7 +468,7 @@ void setup() {
   // Use the green pin to signal transmission.
   pinMode(LEDPIN, OUTPUT);
 
-
+  // Time
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
 
@@ -450,16 +482,22 @@ void setup() {
   display.drawString (0, 0, "Starting....");
   display.display ();
 
+
+  // External Button
+  // Single Click event attachment
+  btn.attachClick(handleButtonClick);
+
+  // CPU Threads
   // Pin webserver to cpu core 1 (0/1)
   xTaskCreatePinnedToCore(
-                    threadWebserverCode,   /* Task function. */
-                    "threadWebserver",     /* name of task. */
-                    10000,       /* Stack size of task */
-                    (void *)1,        /* parameter of the task */
-                    1,           /* priority of the task */
-                    &threadWebserver,/* Task handle to keep track of created task */
-                    0);          /* pin task to core 0 */
-                    
+    threadWebserverCode,   /* Task function. */
+    "threadWebserver",     /* name of task. */
+    10000,       /* Stack size of task */
+    (void *)1,        /* parameter of the task */
+    1,           /* priority of the task */
+    &threadWebserver,/* Task handle to keep track of created task */
+    0);          /* pin task to core 0 */
+
 
   // start LMIC
   os_init();
@@ -467,16 +505,54 @@ void setup() {
   os_runloop();
 }
 
-void threadWebserverCode( void * pvParameters ){
+void threadWebserverCode( void * pvParameters ) {
   vTaskDelay(5000);
-  for(;;){
+  int period = 5000;
+  unsigned long time_now = 0;
+  for (;;) {
+     
     // Webserver requests handeln
     server.handleClient();
     ArduinoOTA.handle();
-    vTaskDelay(1);
-    //    Serial.print("Webserver running on core ");
-    //    Serial.println(xPortGetCoreID());
+
+    // only measure temperature/humidity once every <period>
+    if (millis() > time_now + period) {
+      // Read temperature und humidity
+      int h = (int) dht.readHumidity();
+      int t = (int) dht.readTemperature();
+      if (isnan(h) || isnan(t) ) {
+        Serial.println(F("Failed to read from DHT sensor. Trying again..."));
+        h = dht.readHumidity();
+        t = dht.readTemperature();
+        if (isnan(h) || isnan(t) ) {
+          Serial.println(F("Failed to read from DHT sensor!"));
+        }
+        else {
+          humidity = h;
+          temperature = t;
+        }
+      }
+      else {
+        humidity = h;
+        temperature = t;
+      }
+    }
+    
+    // Button interrupt
+    btn.tick();
+
+    time_now = millis();
+    vTaskDelay(10);
   }
+}
+
+static void handleButtonClick() {
+  LORAWAN_PORT = 11;
+  mLength = 3;
+  message[0] = 0x7B;
+  message[1] = 0x01;
+  message[2] = 0x01;
+  os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(0), do_send);
 }
 
 // loop bootfunktion
